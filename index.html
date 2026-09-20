@@ -1,0 +1,416 @@
+<!DOCTYPE html>
+<html lang="el">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Γεωγραφία Δ' Δημοτικού - Εξερευνητής</title>
+  
+  <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+  <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/canvas-confetti@1.6.0/dist/confetti.browser.min.js"></script>
+
+  <style>
+    * { box-sizing: border-box; font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; }
+    html, body {
+      margin: 0; padding: 0; width: 100%; height: 100%;
+      display: flex; flex-direction: column; background: #eef2f5;
+    }
+    header {
+      background: #1565c0; color: white; padding: 12px 20px;
+      display: flex; flex-wrap: wrap; justify-content: space-between; align-items: center;
+      box-shadow: 0 2px 8px rgba(0,0,0,0.15); z-index: 1001;
+    }
+    .controls { display: flex; gap: 10px; align-items: center; }
+    select, button {
+      padding: 8px 14px; border-radius: 6px; border: none; font-size: 0.95rem; cursor: pointer; font-weight: bold;
+    }
+    #game-bar {
+      background: #ffffff; padding: 12px 20px; display: flex;
+      justify-content: space-between; align-items: center; border-bottom: 2px solid #cfd8dc; z-index: 1001;
+    }
+    #prompt-box { font-size: 1.25rem; font-weight: bold; color: #263238; }
+    #stats-box { font-size: 1.05rem; color: #455a64; font-weight: 600; }
+    .score-badge { color: #2e7d32; font-size: 1.2rem; }
+    
+    /* Γαλάζιο φόντο θάλασσας - Τέρμα τα Blocked/API Keys! */
+    .leaflet-container {
+      background: #cde8f9 !important;
+    }
+    #map-container { 
+      flex: 1 1 auto; width: 100%; min-height: 450px; position: relative;
+    }
+    
+    #feedback {
+      position: absolute; bottom: 25px; left: 50%; transform: translateX(-50%);
+      z-index: 2000; padding: 12px 28px; border-radius: 25px; font-weight: bold;
+      font-size: 1.1rem; color: white; display: none; box-shadow: 0 4px 14px rgba(0,0,0,0.3);
+      pointer-events: none;
+    }
+    .leaflet-interactive { cursor: pointer !important; }
+  </style>
+</head>
+<body>
+
+  <header>
+    <h2 style="margin:0; font-size: 1.3rem;">Εξερευνητής της Ελλάδας 🇬🇷</h2>
+    <div class="controls">
+      <label for="game-mode"><strong>Επίπεδο:</strong></label>
+      <select id="game-mode" onchange="switchMode()">
+        <option value="regions">1. Βρες τα Γεωγραφικά Διαμερίσματα</option>
+        <option value="prefectures">2. Βρες τους Νομούς</option>
+        <option value="capitals">3. Βρες με βάση την Πρωτεύουσα</option>
+      </select>
+      <button onclick="hintTarget()" style="background: #ffb300; color: #212121;">Βοήθεια 💡</button>
+    </div>
+  </header>
+
+  <div id="game-bar">
+    <div id="prompt-box">Φόρτωση χάρτη...</div>
+    <div id="stats-box">Σκορ: <span id="score" class="score-badge">0</span> | Σφάλματα: <span id="mistakes-count">0</span></div>
+  </div>
+
+  <div id="map-container"></div>
+  <div id="feedback"></div>
+
+  <script>
+    // Περιορισμός κάμερας στα σύνορα της Ελλάδας για να μην χάνεται το παιδί στο γαλάζιο
+    const greeceBounds = L.latLngBounds([34.0, 19.0], [42.0, 30.0]);
+    
+    const map = L.map('map-container', {
+      center: [38.3, 24.2],
+      zoom: 7,
+      minZoom: 6,
+      maxZoom: 10,
+      maxBounds: greeceBounds,
+      maxBoundsViscosity: 1.0,
+      attributionControl: false
+    });
+
+    let geojsonLayer = null;
+    let geojsonData = null;
+    let currentTarget = null;
+    let score = 0;
+    let mistakes = 0;
+    let regionLayers = {};
+    let isTransitioning = false;
+
+    // Τα 9 Γεωγραφικά Διαμερίσματα & Χρώματα
+    const regionColors = {
+      "Θράκη": "#e67e22",
+      "Μακεδονία": "#2980b9",
+      "Ήπειρος": "#16a085",
+      "Θεσσαλία": "#8e44ad",
+      "Στερεά Ελλάδα": "#d35400",
+      "Πελοπόννησος": "#27ae60",
+      "Νησιά Ιονίου": "#c0392b",
+      "Νησιά Αιγαίου": "#00acc1",
+      "Κρήτη": "#5c6bc0"
+    };
+
+    // Εξαντλητικό λεξικό (πιάνει 100% τα ονόματα του εξωτερικού αρχείου)
+    const mapOfPrefectures = [
+      { keys: ["evr", "έβρ"], name: "Έβρου", region: "Θράκη", capital: "την Αλεξανδρούπολη" },
+      { keys: ["rodop", "ροδόπ", "rhodope"], name: "Ροδόπης", region: "Θράκη", capital: "την Κομοτηνή" },
+      { keys: ["xanth", "ξάνθ"], name: "Ξάνθης", region: "Θράκη", capital: "την Ξάνθη" },
+      { keys: ["dram", "δράμ"], name: "Δράμας", region: "Μακεδονία", capital: "τη Δράμα" },
+      { keys: ["kaval", "καβάλ"], name: "Καβάλας", region: "Μακεδονία", capital: "την Καβάλα" },
+      { keys: ["serr", "σέρρ"], name: "Σερρών", region: "Μακεδονία", capital: "τις Σέρρες" },
+      { keys: ["kilk", "κιλκ"], name: "Κιλκίς", region: "Μακεδονία", capital: "το Κιλκίς" },
+      { keys: ["thessalonik", "θεσσαλονίκ"], name: "Θεσσαλονίκης", region: "Μακεδονία", capital: "τη Θεσσαλονίκη" },
+      { keys: ["chalkid", "halkid", "khalkid", "χαλκιδ"], name: "Χαλκιδικής", region: "Μακεδονία", capital: "τον Πολύγυρο" },
+      { keys: ["pell", "πέλλ"], name: "Πέλλας", region: "Μακεδονία", capital: "την Έδεσσα" },
+      { keys: ["imath", "ημαθ"], name: "Ημαθίας", region: "Μακεδονία", capital: "τη Βέροια" },
+      { keys: ["pieri", "πιερί"], name: "Πιερίας", region: "Μακεδονία", capital: "την Κατερίνη" },
+      { keys: ["florin", "φλώριν"], name: "Φλώρινας", region: "Μακεδονία", capital: "τη Φλώρινα" },
+      { keys: ["kozan", "κοζάν"], name: "Κοζάνης", region: "Μακεδονία", capital: "την Κοζάνη" },
+      { keys: ["kastori", "καστορι"], name: "Καστοριάς", region: "Μακεδονία", capital: "την Καστοριά" },
+      { keys: ["greven", "γρεβεν"], name: "Γρεβενών", region: "Μακεδονία", capital: "τα Γρεβενά" },
+      { keys: ["athos", "agion", "άγιον"], name: "Αγίου Όρους", region: "Μακεδονία", capital: "τις Καρυές" },
+      { keys: ["ioannin", "yanin", "ιωαννίν"], name: "Ιωαννίνων", region: "Ήπειρος", capital: "τα Ιωάννινα" },
+      { keys: ["art", "άρτ"], name: "Άρτας", region: "Ήπειρος", capital: "την Άρτα" },
+      { keys: ["prevez", "πρέβεζ"], name: "Πρέβεζας", region: "Ήπειρος", capital: "την Πρέβεζα" },
+      { keys: ["thesprot", "θεσπρωτ"], name: "Θεσπρωτίας", region: "Ήπειρος", capital: "την Ηγουμενίτσα" },
+      { keys: ["laris", "λάρισ"], name: "Λάρισας", region: "Θεσσαλία", capital: "τη Λάρισα" },
+      { keys: ["magnis", "magnes", "μαγνησ"], name: "Μαγνησίας", region: "Θεσσαλία", capital: "το Βόλο" },
+      { keys: ["trikal", "τρίκαλ"], name: "Τρικάλων", region: "Θεσσαλία", capital: "τα Τρίκαλα" },
+      { keys: ["kardits", "καρδίτσ"], name: "Καρδίτσας", region: "Θεσσαλία", capital: "την Καρδίτσα" },
+      { keys: ["attic", "attik", "αττικ"], name: "Αττικής", region: "Στερεά Ελλάδα", capital: "την Αθήνα" },
+      { keys: ["boeot", "vioti", "βοιωτ"], name: "Βοιωτίας", region: "Στερεά Ελλάδα", capital: "τη Λιβαδειά" },
+      { keys: ["evvoi", "euboe", "evia", "εύβοι"], name: "Εύβοιας", region: "Στερεά Ελλάδα", capital: "τη Χαλκίδα" },
+      { keys: ["evryt", "evrit", "ευρυταν"], name: "Ευρυτανίας", region: "Στερεά Ελλάδα", capital: "το Καρπενήσι" },
+      { keys: ["fthiot", "phthiot", "φθιώτ"], name: "Φθιώτιδας", region: "Στερεά Ελλάδα", capital: "τη Λαμία" },
+      { keys: ["fokid", "phoci", "φωκίδ"], name: "Φωκίδας", region: "Στερεά Ελλάδα", capital: "την Άμφισσα" },
+      { keys: ["aetoli", "aitoli", "etolo", "αιτωλ", "akarnani"], name: "Αιτωλοακαρνανίας", region: "Στερεά Ελλάδα", capital: "το Μεσολόγγι" },
+      { keys: ["achai", "achae", "αχαΐ"], name: "Αχαΐας", region: "Πελοπόννησος", capital: "την Πάτρα" },
+      { keys: ["eli", "ili", "ηλεί"], name: "Ηλείας", region: "Πελοπόννησος", capital: "τον Πύργο" },
+      { keys: ["corinth", "korinth", "κορινθ"], name: "Κορινθίας", region: "Πελοπόννησος", capital: "την Κόρινθο" },
+      { keys: ["arcad", "arkad", "αρκαδ"], name: "Αρκαδίας", region: "Πελοπόννησος", capital: "την Τρίπολη" },
+      { keys: ["argoli", "αργολ"], name: "Αργολίδας", region: "Πελοπόννησος", capital: "το Ναύπλιο" },
+      { keys: ["laconi", "lakoni", "λακων"], name: "Λακωνίας", region: "Πελοπόννησος", capital: "τη Σπάρτη" },
+      { keys: ["messeni", "messini", "μεσσην"], name: "Μεσσηνίας", region: "Πελοπόννησος", capital: "την Καλαμάτα" },
+      { keys: ["corfu", "kerkyr", "κέρκυρ"], name: "Κέρκυρας", region: "Νησιά Ιονίου", capital: "την Κέρκυρα" },
+      { keys: ["lefkad", "lefkas", "λευκάδ"], name: "Λευκάδας", region: "Νησιά Ιονίου", capital: "τη Λευκάδα" },
+      { keys: ["kefalon", "kefallin", "cephall", "κεφαλλην", "κεφαλον"], name: "Κεφαλληνίας", region: "Νησιά Ιονίου", capital: "το Αργοστόλι" },
+      { keys: ["ithac", "ithak", "ιθάκ"], name: "Κεφαλληνίας", region: "Νησιά Ιονίου", capital: "το Αργοστόλι" },
+      { keys: ["zakynth", "zante", "ζάκυνθ"], name: "Ζακύνθου", region: "Νησιά Ιονίου", capital: "τη Ζάκυνθο" },
+      { keys: ["lesb", "lesv", "λέσβ"], name: "Λέσβου", region: "Νησιά Αιγαίου", capital: "τη Μυτιλήνη" },
+      { keys: ["chi", "χί"], name: "Χίου", region: "Νησιά Αιγαίου", capital: "τη Χίο" },
+      { keys: ["sam", "σάμ"], name: "Σάμου", region: "Νησιά Αιγαίου", capital: "τη Σάμο" },
+      { keys: ["cyclad", "kyklad", "κυκλάδ"], name: "Κυκλάδων", region: "Νησιά Αιγαίου", capital: "την Ερμούπολη" },
+      { keys: ["dodecan", "dodekan", "δωδεκαν"], name: "Δωδεκανήσου", region: "Νησιά Αιγαίου", capital: "τη Ρόδο" },
+      { keys: ["chani", "χανι"], name: "Χανίων", region: "Κρήτη", capital: "τα Χανιά" },
+      { keys: ["rethymn", "ρέθυμν"], name: "Ρεθύμνου", region: "Κρήτη", capital: "το Ρέθυμνο" },
+      { keys: ["herakli", "iraklei", "ηρακλεί"], name: "Ηρακλείου", region: "Κρήτη", capital: "το Ηράκλειο" },
+      { keys: ["lasith", "lassith", "λασιθ"], name: "Λασιθίου", region: "Κρήτη", capital: "τον Άγιο Νικόλαο" }
+    ];
+
+    // Υπολογισμός Κέντρου ενός πολύγωνου (για απόλυτη ασφάλεια αν λείπει το όνομα)
+    function getFeatureCenter(feature) {
+      try {
+        const coords = feature.geometry.coordinates;
+        let lat = 0, lng = 0, count = 0;
+        function traverse(arr) {
+          if (typeof arr[0] === 'number') {
+            lng += arr[0];
+            lat += arr[1];
+            count++;
+          } else {
+            arr.forEach(traverse);
+          }
+        }
+        traverse(coords);
+        return { lat: lat / count, lng: lng / count };
+      } catch (e) {
+        return { lat: 38, lng: 24 };
+      }
+    }
+
+    const GEOJSON_URL = 'https://raw.githubusercontent.com/codeforgermany/click_that_hood/main/public/data/greece-prefectures.geojson';
+
+    fetch(GEOJSON_URL)
+      .then(res => res.json())
+      .then(data => {
+        geojsonData = data;
+
+        geojsonData.features.forEach(f => {
+          let nameToSearch = (f.properties.name || "") + " " + (f.properties.name_el || "") + " " + (f.properties.id || "");
+          nameToSearch = nameToSearch.toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "");
+
+          let matched = null;
+          for (let i = 0; i < mapOfPrefectures.length; i++) {
+            let entry = mapOfPrefectures[i];
+            for (let j = 0; j < entry.keys.length; j++) {
+              let key = entry.keys[j].toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "");
+              if (nameToSearch.includes(key)) {
+                matched = entry;
+                break;
+              }
+            }
+            if (matched) break;
+          }
+
+          // ΑΝ ΔΕΝ ΒΡΕΘΕΙ ΟΝΟΜΑ, ΔΕΝ ΔΙΑΓΡΑΦΟΥΜΕ ΤΟ ΚΟΜΜΑΤΙ! Το χρωματίζουμε βάσει της θέσης του (Συντεταγμένες)
+          if (!matched) {
+            let center = getFeatureCenter(f);
+            if (center.lat < 35.7) matched = { name: "Περιοχή Κρήτης", region: "Κρήτη", capital: "το Ηράκλειο" };
+            else if (center.lng < 21.1) matched = { name: "Περιοχή Ιονίου", region: "Νησιά Ιονίου", capital: "την Κέρκυρα" };
+            else if (center.lat < 38.3 && center.lng < 23.3) matched = { name: "Περιοχή Πελοποννήσου", region: "Πελοπόννησος", capital: "την Τρίπολη" };
+            else if (center.lat > 40.5 && center.lng > 24.5) matched = { name: "Περιοχή Θράκης", region: "Θράκη", capital: "την Κομοτηνή" };
+            else if (center.lat > 39.8) matched = { name: "Περιοχή Μακεδονίας", region: "Μακεδονία", capital: "τη Θεσσαλονίκη" };
+            else if (center.lng > 24.5) matched = { name: "Περιοχή Αιγαίου", region: "Νησιά Αιγαίου", capital: "την Ερμούπολη" };
+            else matched = { name: "Περιοχή Στερεάς Ελλάδας", region: "Στερεά Ελλάδα", capital: "την Αθήνα" };
+          }
+
+          f.properties.name = matched.name;
+          f.properties.region = matched.region;
+          f.properties.capital = matched.capital;
+        });
+
+        renderMap();
+        nextRound();
+      })
+      .catch(err => {
+        document.getElementById('prompt-box').textContent = "Σφάλμα φόρτωσης χάρτη.";
+      });
+
+    function getFeatureStyle(feature) {
+      const mode = document.getElementById('game-mode').value;
+      const reg = feature.properties.region;
+      const color = regionColors[reg] || "#2980b9";
+
+      if (mode === 'regions') {
+        return {
+          fillColor: color,
+          weight: 1.5,
+          opacity: 1,
+          color: '#ffffff',
+          fillOpacity: 0.85
+        };
+      } else {
+        return {
+          fillColor: '#3498db',
+          weight: 1.5,
+          opacity: 1,
+          color: '#ffffff',
+          fillOpacity: 0.85
+        };
+      }
+    }
+
+    function highlightRegion(regionName, highlight) {
+      if (!regionLayers[regionName]) return;
+      regionLayers[regionName].forEach(l => {
+        if (highlight) {
+          l.setStyle({ fillOpacity: 1, weight: 2.5, color: '#0d47a1' });
+        } else {
+          l.setStyle(getFeatureStyle(l.feature));
+        }
+      });
+    }
+
+    function renderMap() {
+      if (geojsonLayer) map.removeLayer(geojsonLayer);
+      regionLayers = {};
+
+      geojsonLayer = L.geoJson(geojsonData, {
+        style: getFeatureStyle,
+        onEachFeature: (feature, layer) => {
+          const reg = feature.properties.region;
+          if (!regionLayers[reg]) regionLayers[reg] = [];
+          regionLayers[reg].push(layer);
+
+          layer.on({
+            mouseover: () => {
+              if (isTransitioning) return;
+              const mode = document.getElementById('game-mode').value;
+              if (mode === 'regions') {
+                highlightRegion(reg, true);
+              } else {
+                layer.setStyle({ fillOpacity: 1, weight: 2.5, color: '#0d47a1' });
+              }
+            },
+            mouseout: () => {
+              if (isTransitioning) return;
+              const mode = document.getElementById('game-mode').value;
+              if (mode === 'regions') {
+                highlightRegion(reg, false);
+              } else {
+                layer.setStyle(getFeatureStyle(feature));
+              }
+            },
+            click: () => {
+              if (isTransitioning) return;
+              handleFeatureClick(feature, layer);
+            }
+          });
+        }
+      }).addTo(map);
+    }
+
+    function switchMode() {
+      score = 0;
+      mistakes = 0;
+      isTransitioning = false;
+      document.getElementById('score').textContent = score;
+      document.getElementById('mistakes-count').textContent = mistakes;
+      renderMap();
+      nextRound();
+    }
+
+    function nextRound() {
+      if (!geojsonData || geojsonData.features.length === 0) return;
+      mistakes = 0;
+      isTransitioning = false;
+      document.getElementById('mistakes-count').textContent = mistakes;
+      const mode = document.getElementById('game-mode').value;
+
+      if (mode === 'regions') {
+        const availableRegions = Object.keys(regionColors);
+        const randomRegion = availableRegions[Math.floor(Math.random() * availableRegions.length)];
+        currentTarget = { region: randomRegion };
+        document.getElementById('prompt-box').innerHTML = `Κάνε κλικ στο γεωγραφικό διαμέρισμα: <u style="color:${regionColors[randomRegion]}">${currentTarget.region}</u>`;
+      } else if (mode === 'prefectures') {
+        const randomFeature = geojsonData.features[Math.floor(Math.random() * geojsonData.features.length)];
+        currentTarget = randomFeature.properties;
+        document.getElementById('prompt-box').innerHTML = `Πού βρίσκεται ο <u>Νομός ${currentTarget.name}</u>;`;
+      } else if (mode === 'capitals') {
+        const validList = geojsonData.features.filter(f => f.properties.capital);
+        const randomFeature = validList[Math.floor(Math.random() * validList.length)];
+        currentTarget = randomFeature.properties;
+        document.getElementById('prompt-box').innerHTML = `Ποιος νομός έχει πρωτεύουσα <u>${currentTarget.capital}</u>;`;
+      }
+    }
+
+    function handleFeatureClick(feature, layer) {
+      const mode = document.getElementById('game-mode').value;
+      const clickedRegion = feature.properties.region;
+
+      if (mode === 'regions') {
+        if (clickedRegion === currentTarget.region) {
+          isTransitioning = true;
+          showFeedback(`Μπράβο! Σωστά, αυτό είναι το διαμέρισμα: ${clickedRegion}`, "#2e7d32");
+          score += Math.max(10 - mistakes * 3, 2);
+          document.getElementById('score').textContent = score;
+          confetti({ particleCount: 40, spread: 70, origin: { y: 0.75 } });
+
+          regionLayers[clickedRegion].forEach(l => l.setStyle({ fillColor: '#2ecc71', color: '#1b5e20', fillOpacity: 0.95 }));
+          setTimeout(() => {
+            renderMap();
+            nextRound();
+          }, 1100);
+        } else {
+          mistakes++;
+          document.getElementById('mistakes-count').textContent = mistakes;
+          showFeedback(`Όχι, πάτησες το διαμέρισμα: ${clickedRegion}`, "#c62828");
+          if (regionLayers[clickedRegion]) {
+            regionLayers[clickedRegion].forEach(l => l.setStyle({ fillColor: '#e74c3c', color: '#b71c1c', fillOpacity: 0.85 }));
+            setTimeout(() => {
+              regionLayers[clickedRegion].forEach(l => l.setStyle(getFeatureStyle(l.feature)));
+            }, 650);
+          }
+        }
+      } else {
+        const isCorrect = (feature.properties.name === currentTarget.name);
+
+        if (isCorrect) {
+          isTransitioning = true;
+          showFeedback(`Μπράβο! Σωστά, αυτός είναι ο Νομός ${feature.properties.name}`, "#2e7d32");
+          score += Math.max(10 - mistakes * 3, 2);
+          document.getElementById('score').textContent = score;
+          confetti({ particleCount: 35, spread: 70, origin: { y: 0.75 } });
+
+          layer.setStyle({ fillColor: '#2ecc71', fillOpacity: 0.95, color: '#1b5e20' });
+          setTimeout(() => {
+            renderMap();
+            nextRound();
+          }, 1100);
+        } else {
+          mistakes++;
+          document.getElementById('mistakes-count').textContent = mistakes;
+          showFeedback(`Όχι, αυτός είναι ο Νομός ${feature.properties.name}`, "#c62828");
+          layer.setStyle({ fillColor: '#e74c3c', fillOpacity: 0.85, color: '#b71c1c' });
+          setTimeout(() => layer.setStyle(getFeatureStyle(feature)), 650);
+        }
+      }
+    }
+
+    function hintTarget() {
+      const mode = document.getElementById('game-mode').value;
+      if (mode === 'prefectures' || mode === 'capitals') {
+        showFeedback(`Βοήθεια: Βρίσκεται στο διαμέρισμα: ${currentTarget.region}`, "#ff8f00");
+      } else {
+        showFeedback(`Κοίταξε προσεκτικά το χρώμα του διαμερίσματος στην ερώτηση!`, "#ff8f00");
+      }
+    }
+
+    function showFeedback(text, color) {
+      const fb = document.getElementById('feedback');
+      fb.textContent = text;
+      fb.style.background = color;
+      fb.style.display = 'block';
+      clearTimeout(window.fbTimeout);
+      window.fbTimeout = setTimeout(() => { fb.style.display = 'none'; }, 2500);
+    }
+  </script>
+</body>
+</html>
